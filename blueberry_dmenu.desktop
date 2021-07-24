@@ -1,0 +1,8 @@
+[Desktop Entry]
+Categories=Settings;Bluetooth;
+Name=blueberry_dmenu
+GenericName=BluberryDmenu Settings
+Exec=blueberry_dmenu
+Type=Application
+
+

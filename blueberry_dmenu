@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+# encoding:utf8
+"""NetworkManager command line dmenu script.
+
+To add new connections or enable/disable networking requires policykit
+permissions setup per:
+https://wiki.archlinux.org/index.php/NetworkManager#Set_up_PolicyKit_permissions
+
+OR running the script as root
+
+Add dmenu formatting options and default terminal if desired to
+~/.config/blueberry-dmenu/config.ini
+
+"""
+import pathlib
+import struct
+import configparser
+import itertools
+import locale
+import os
+from os.path import expanduser
+import shlex
+import sys
+from subprocess import Popen, PIPE
+
+import gi
+
+from gi.repository import GLib  # pylint: disable=wrong-import-position
+
+ENV = os.environ.copy()
+ENV['LC_ALL'] = 'C'
+ENC = locale.getpreferredencoding()
+
+LOOP = GLib.MainLoop()
+
+CONF = configparser.ConfigParser()
+CONF.read(expanduser("~/.config/blueberry-dmenu/config.ini"))
+
+
+def dmenu_cmd(num_lines, prompt="Devices", active_lines=None):  # pylint: disable=too-many-branches
+    """Parse config.ini if it exists and add options to the dmenu command
+
+    Args: args - num_lines: number of lines to display
+                 prompt: prompt to show
+    Returns: command invocation (as a list of strings) for
+                dmenu -l <num_lines> -p <prompt> -i ...
+
+    """
+    dmenu_command = "dmenu"
+    if not CONF.sections():
+        res = [dmenu_command, "-i", "-l", str(num_lines), "-p", str(prompt)]
+        res.extend(sys.argv[1:])
+        return res
+    if CONF.has_section('dmenu'):
+        args = CONF.items('dmenu')
+        args_dict = dict(args)
+        dmenu_args = []
+        if "dmenu_command" in args_dict:
+            command = shlex.split(args_dict["dmenu_command"])
+            dmenu_command = command[0]
+            dmenu_args = command[1:]
+            del args_dict["dmenu_command"]
+        if "p" in args_dict and prompt == "Devices":
+            prompt = args_dict["p"]
+            del args_dict["p"]
+        elif "p" in args_dict:
+            del args_dict["p"]
+        if "rofi" in dmenu_command:
+            lines = "-i -dmenu -lines"
+            # rofi doesn't support 0 length line, it requires at least -lines=1
+            # see https://github.com/DaveDavenport/rofi/issues/252
+            num_lines = num_lines or 1
+        else:
+            lines = "-i -l"
+    extras = (["-" + str(k), str(v)] for (k, v) in args_dict.items())
+    res = [dmenu_command, "-p", str(prompt)]
+    res.extend(dmenu_args)
+    res += list(itertools.chain.from_iterable(extras))
+    res[1:1] = lines.split()
+    res = list(filter(None, res))  # Remove empty list elements
+    res.extend(sys.argv[1:])
+    return res
+
+
+def bluetooth_get_enabled():
+    """Check if bluetooth is enabled via rfkill.N
+
+    Returns None if no bluetooth device was found.
+    """
+    # See https://www.kernel.org/doc/Documentation/ABI/stable/sysfs-class-rfkill
+    for path in pathlib.Path('/sys/class/rfkill/').glob('rfkill*'):
+        if (path / 'type').read_text().strip() == 'bluetooth':
+            return (path / 'soft').read_text().strip() == '0'
+    return None
+
+
+class Action:  # pylint: disable=too-few-public-methods
+    """Helper class to execute functions from a string variable"""
+
+    def __init__(self,
+                 name,
+                 func,
+                 args=None,
+                 active=False):
+        self.name = name
+        self.func = func
+        self.is_active = active
+        if args is None:
+            self.args = None
+        elif isinstance(args, list):
+            self.args = args
+        else:
+            self.args = [args]
+
+    def __str__(self):
+        return self.name
+
+    def __call__(self):
+        if self.args is None:
+            self.func()
+        else:
+            self.func(*self.args)
+
+
+def get_selection(all_actions):
+    """Spawn dmenu for selection and execute the associated action."""
+    rofi_highlight = CONF.getboolean('dmenu', 'rofi_highlight', fallback=False)
+    inp = []
+
+    if rofi_highlight is True:
+        inp = [str(action) for action in all_actions]
+    else:
+        inp = [('== ' if action.is_active else '   ') + str(action)
+               for action in all_actions]
+    active_lines = [index for index, action in enumerate(all_actions)
+                    if action.is_active]
+
+    inp_bytes = "\n".join(inp).encode(ENC)
+    command = dmenu_cmd(len(inp), active_lines=active_lines)
+    sel = Popen(command, stdin=PIPE, stdout=PIPE,
+                env=ENV).communicate(input=inp_bytes)[0].decode(ENC)
+
+    if not sel.rstrip():
+        sys.exit()
+
+    if rofi_highlight is False:
+        action = [i for i in all_actions
+                  if ((str(i).strip() == str(sel.strip())
+                       and not i.is_active) or
+                      ('== ' + str(i) == str(sel.rstrip('\n'))
+                       and i.is_active))]
+    else:
+        action = [i for i in all_actions if str(i).strip() == sel.strip()]
+
+    assert len(action) == 1, \
+        u"Selection was ambiguous: '{}'".format(str(sel.strip()))
+    return action[0]
+
+
+def toggle_bluetooth(enable):
+    """Enable/disable Bluetooth
+
+    Args: enable - boolean
+
+    References:
+    https://github.com/blueman-project/blueman/blob/master/blueman/plugins/mechanism/RfKill.py
+    https://www.kernel.org/doc/html/latest/driver-api/rfkill.html
+    https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/uapi/linux/rfkill.h?h=v5.8.9
+
+    """
+    type_bluetooth = 2
+    op_change_all = 3
+    idx = 0
+    soft_state = 0 if enable else 1
+    hard_state = 0
+
+    data = struct.pack("IBBBB", idx, type_bluetooth, op_change_all,
+                       soft_state, hard_state)
+
+    try:
+        with open('/dev/rfkill', 'r+b', buffering=0) as rff:
+            rff.write(data)
+    except PermissionError:
+        notify("Lacking permission to write to /dev/rfkill.",
+               "Maybe you need to add your user to the 'rfkill' group?",
+               urgency="critical")
+    else:
+        notify("Bluetooth {}".format("enabled" if enable else "disabled"))
+
+
+def notify(message, details=None, urgency="low"):
+    """Use notify-send if available for notifications
+
+    """
+    args = ["-u", urgency, message]
+    if details is not None:
+        args.append(details)
+
+    try:
+        Popen(["notify-send"] + args,
+              stdout=PIPE, stderr=PIPE).communicate()
+    except FileNotFoundError:
+        pass
+
+
+def divide_bluetooth_name(name: str) -> tuple[str, str]:
+    parts = [x.replace(")", "").strip() for x in name.split("(")]
+    if len(parts) < 2:
+        return "", ""
+    return parts[0], parts[1]
+
+
+def connect_bluetooth_function(mac: str):
+    def connection():
+        connected = Popen(f'''bluetoothctl info {mac} | grep 'Connected: yes' ''', shell=True,
+                          stdout=PIPE).communicate()
+        if not connected[0]:
+            Popen(['bluetoothctl', 'connect', mac]).communicate()
+        else:
+            Popen(['bluetoothctl', 'disconnect', mac]).communicate()
+
+    return connection
+
+
+def run():
+    os.spawnl(os.P_NOWAIT, 'bluetoothctl', 'scan', 'on')
+    """Main script entrypoint"""
+    devices_names = [x.decode("UTF-8") for x in
+                     Popen(['bt-device', '-l'], stdout=PIPE, stderr=PIPE).communicate()[0].splitlines()]
+    devices_names.pop(0)
+    # Should really change it
+    devices = [divide_bluetooth_name(name) for name in devices_names if name[2] != '-']
+
+    bluetooth_enabled = bool(bluetooth_get_enabled())
+
+    actions = [Action(device[0], connect_bluetooth_function(device[1])) for device in devices]
+    actions.insert(0, Action("Disable bluetooth" if bluetooth_enabled else "Enable bluetooth",
+                             toggle_bluetooth,
+                             not bluetooth_enabled))
+    sel = get_selection(actions)
+    sel()
+
+
+if __name__ == '__main__':
+    run()
+
+# vim: set et ts=4 sw=4 :
