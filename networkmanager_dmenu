@@ -26,6 +26,7 @@ from subprocess import Popen, PIPE
 import bluetooth
 
 import gi
+
 gi.require_version('NM', '1.0')
 from gi.repository import GLib, NM  # pylint: disable=wrong-import-position
 
@@ -39,6 +40,7 @@ CONNS = CLIENT.get_connections()
 
 CONF = configparser.ConfigParser()
 CONF.read(expanduser("~/.config/networkmanager-dmenu/config.ini"))
+
 
 def dmenu_cmd(num_lines, prompt="Networks", active_lines=None):  # pylint: disable=too-many-branches
     """Parse config.ini if it exists and add options to the dmenu command
@@ -260,6 +262,7 @@ def ap_security(nm_ap):
 
 class Action():  # pylint: disable=too-few-public-methods
     """Helper class to execute functions from a string variable"""
+
     def __init__(self,
                  name,
                  func,
@@ -550,6 +553,7 @@ def get_selection(all_actions):
                        and i.is_active))]
     else:
         action = [i for i in all_actions if str(i).strip() == sel.strip()]
+
     assert len(action) == 1, \
         u"Selection was ambiguous: '{}'".format(str(sel.strip()))
     return action[0]
@@ -849,14 +853,36 @@ def notify(message, details=None, urgency="low"):
         pass
 
 
+def divide_bluetooth_name(name: str) -> tuple[str, str]:
+    parts = [x.replace(")", "").strip() for x in name.split("(")]
+    if len(parts) < 2:
+        return "", ""
+    return parts[0], parts[1]
+
+
+def connect_bluetooth_function(mac: str):
+    def connection():
+        connected = Popen(f'''bluetoothctl info {mac} | grep 'Connected: yes' ''', shell=True,
+                          stdout=PIPE).communicate()
+        print(connected)
+        if not connected[0]:
+            Popen(['bluetoothctl', 'connect', mac]).communicate()
+        else:
+            Popen(['bluetoothctl', 'disconnect', mac]).communicate()
+
+    return connection
+
+
 def run():
     """Main script entrypoint"""
-    devices_names = [x.decode("UTF-8") for x in Popen(['bt-device', '-l'], stdout=PIPE, stderr=PIPE).communicate()[0].splitlines()]
+    devices_names = [x.decode("UTF-8") for x in
+                     Popen(['bt-device', '-l'], stdout=PIPE, stderr=PIPE).communicate()[0].splitlines()]
     devices_names.pop(0)
+    devices = [divide_bluetooth_name(name) for name in devices_names]
 
-    print(devices_names)
+    print(devices)
 
-    actions = [Action(device, lambda: print(device)) for device in devices_names]
+    actions = [Action(device[0], connect_bluetooth_function(device[1])) for device in devices]
     sel = get_selection(actions)
     sel()
 
