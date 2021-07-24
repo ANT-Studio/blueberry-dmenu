@@ -23,6 +23,7 @@ import shlex
 import sys
 import uuid
 from subprocess import Popen, PIPE
+import bluetooth
 
 import gi
 gi.require_version('NM', '1.0')
@@ -850,46 +851,12 @@ def notify(message, details=None, urgency="low"):
 
 def run():
     """Main script entrypoint"""
-    active = CLIENT.get_active_connections()
-    adapter = choose_adapter(CLIENT)
-    if adapter:
-        ap_actions = create_ap_actions(*create_ap_list(adapter, active))
-    else:
-        ap_actions = []
+    devices_names = [x.decode("UTF-8") for x in Popen(['bt-device', '-l'], stdout=PIPE, stderr=PIPE).communicate()[0].splitlines()]
+    devices_names.pop(0)
 
-    vpns = [i for i in CONNS if i.is_type(NM.SETTING_VPN_SETTING_NAME)]
-    try:
-        wgs = [i for i in CONNS if i.is_type(NM.SETTING_WIREGUARD_SETTING_NAME)]
-    except AttributeError:
-        # Workaround for older versions of python-gobject with no wireguard support
-        wgs = []
-    eths = [i for i in CONNS if i.is_type(NM.SETTING_WIRED_SETTING_NAME)]
-    blues = [i for i in CONNS if i.is_type(NM.SETTING_BLUETOOTH_SETTING_NAME)]
+    print(devices_names)
 
-    vpn_actions = create_vpn_actions(vpns, active)
-    wg_actions = create_wireguard_actions(wgs, active)
-    eth_actions = create_eth_actions(eths, active)
-    blue_actions = create_blue_actions(blues, active)
-    other_actions = create_other_actions(CLIENT)
-    wwan_installed = is_modemmanager_installed()
-    if wwan_installed:
-        gsms = [i for i in CONNS if i.is_type(NM.SETTING_GSM_SETTING_NAME)]
-        gsm_actions = create_gsm_actions(gsms, active)
-        wwan_actions = create_wwan_actions(CLIENT)
-    else:
-        gsm_actions = []
-        wwan_actions = []
-
-    list_saved = CONF.getboolean('dmenu', 'list_saved', fallback=False)
-    saved_cons = [i for i in CONNS if i not in vpns + wgs + eths + blues]
-    if list_saved:
-        saved_actions = create_saved_actions(saved_cons)
-    else:
-        saved_actions = [Action("Saved connections", prompt_saved, [saved_cons])]
-
-    actions = combine_actions(eth_actions, ap_actions, vpn_actions, wg_actions,
-                              gsm_actions, blue_actions, wwan_actions,
-                              other_actions, saved_actions)
+    actions = [Action(device, lambda: print(device)) for device in devices_names]
     sel = get_selection(actions)
     sel()
 
